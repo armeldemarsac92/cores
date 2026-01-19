@@ -114,6 +114,16 @@ typedef union {
 	uint64_t bothwords;
 } setup_t;
 
+//CUSTOM FEATURE REPORT UTILS
+volatile uint8_t custom_feature_buffer[66]; // Buffer for 64 bytes + potential Report IDs
+volatile uint8_t custom_feature_data_ready = 0;
+volatile uint16_t custom_feature_len_received = 0;
+
+static void custom_feature_complete(void) {
+	custom_feature_data_ready = 1;
+	usb_endpoint0_transmit(NULL, 0); // Status Phase (ACK)
+}
+
 static setup_t endpoint0_setupdata;
 static uint32_t endpoint0_notify_mask=0;
 static uint32_t endpointN_notify_mask=0;
@@ -154,7 +164,7 @@ FLASHMEM void usb_init(void)
 	// assume PLL3 is already running - already done by usb_pll_start() in main.c
 
 	CCM_CCGR6 |= CCM_CCGR6_USBOH3(CCM_CCGR_ON); // turn on clocks to USB peripheral
-	
+
 	printf("BURSTSIZE=%08lX\n", USB1_BURSTSIZE);
 	//USB1_BURSTSIZE = USB_BURSTSIZE_TXPBURST(4) | USB_BURSTSIZE_RXPBURST(4);
 	USB1_BURSTSIZE = 0x0404;
@@ -633,16 +643,27 @@ static void endpoint0_setup(uint64_t setupdata)
 		endpoint0_receive(endpoint0_buffer, 7, 1);
 		return;
 #endif
+//CUSTOM FEATURE REPORT UTILS
 #if defined(SEREMU_INTERFACE) || defined(KEYBOARD_INTERFACE)
-	  case 0x0921: // HID SET_REPORT
-		if (setup.wLength <= sizeof(endpoint0_buffer)) {
-			//printf("hid set report %x %x\n", setup.word1, setup.word2);
-			endpoint0_setupdata.bothwords = setup.bothwords;
-			endpoint0_buffer[0] = 0xE9;
-			endpoint0_receive(endpoint0_buffer, setup.wLength, 1);
-			return;
-		}
-		break;
+		case 0x0921: // HID SET_REPORT
+			// Check for our custom length (64 or 65 bytes)
+			if (setup.wLength == 64 || setup.wLength == 65) {
+				endpoint0_setupdata.bothwords = setup.bothwords;
+				custom_feature_len_received = setup.wLength;
+
+				// Receive data into our buffer.
+				// Args: buffer, length, notify(1)
+				endpoint0_receive((void *)custom_feature_buffer, setup.wLength, 1);
+				return;
+			}
+
+			// Standard Keyboard LEDs (usually 1 byte)
+			if (setup.wLength <= sizeof(endpoint0_buffer)) {
+				endpoint0_setupdata.bothwords = setup.bothwords;
+				endpoint0_receive(endpoint0_buffer, setup.wLength, 1);
+				return;
+			}
+			break;
 #endif
 #if defined(AUDIO_INTERFACE)
 	  case 0x0B01: // SET_INTERFACE (alternate setting)
@@ -864,10 +885,25 @@ static void endpoint0_complete(void)
 		}
 	}
 #endif
+//CUSTOM FEATURE REPORT UTILS
 #ifdef KEYBOARD_INTERFACE
+	// 1. Standard Keyboard LEDs (Report Type 0x02, Output)
 	if (setup.word1 == 0x02000921 && setup.word2 == ((1 << 16) | KEYBOARD_INTERFACE)) {
 		keyboard_leds = endpoint0_buffer[0];
 		endpoint0_transmit(NULL, 0, 0);
+	}
+
+	// 2. CUSTOM FEATURE REPORT (Report Type 0x03, Feature)
+	// Check for SET_REPORT(0x09) and Feature(0x03).
+	// Mask 0xFF00FFFF ignores the Report ID byte (byte 2) so it works for ID 0 or 1.
+	if ((setup.word1 & 0xFF00FFFF) == 0x03000921 && setup.wIndex == KEYBOARD_INTERFACE) {
+
+		// Fix: Cast to (void*) to stop "discards volatile" error
+		arm_dcache_delete((void*)custom_feature_buffer, 64);
+
+		custom_feature_data_ready = 1;  // Notify sketch
+		endpoint0_transmit(NULL, 0, 0); // Send ZLP (ACK)
+		return;
 	}
 #endif
 #ifdef SEREMU_INTERFACE
