@@ -118,11 +118,12 @@ typedef union {
 volatile uint8_t custom_feature_buffer[66]; // Buffer for 64 bytes + potential Report IDs
 volatile uint8_t custom_feature_data_ready = 0;
 volatile uint16_t custom_feature_len_received = 0;
+volatile uint8_t custom_feature_reply_buffer[66];
+volatile uint8_t custom_feature_reply_data_ready = 0;
+volatile uint16_t custom_feature_reply_len_received = 65;
 
-static void custom_feature_complete(void) {
-	custom_feature_data_ready = 1;
-	usb_endpoint0_transmit(NULL, 0); // Status Phase (ACK)
-}
+#define CUSTOM_FEATURE_REPORT_ID_WINDOW  0x01
+#define CUSTOM_FEATURE_REPORT_ID_COMMAND 0x02
 
 static setup_t endpoint0_setupdata;
 static uint32_t endpoint0_notify_mask=0;
@@ -725,8 +726,66 @@ static void endpoint0_setup(uint64_t setupdata)
 		}
 		break;
 #endif
-#if defined(MULTITOUCH_INTERFACE)
+#if defined(KEYBOARD_INTERFACE) || defined(MULTITOUCH_INTERFACE)
 	  case 0x01A1:
+#if defined(KEYBOARD_INTERFACE)
+		// HID GET_REPORT (Feature) for keyboard interface.
+		// This allows host-side agents to poll report IDs (e.g. 0x02) over EP0.
+		if ((setup.wValue & 0xFF00) == 0x0300 && setup.wIndex == KEYBOARD_INTERFACE &&
+		    (setup.wLength == 64 || setup.wLength == 65)) {
+			const uint8_t requested_report_id = (uint8_t)(setup.wValue & 0x00FF);
+			if (requested_report_id == CUSTOM_FEATURE_REPORT_ID_WINDOW) {
+				// Window title flow is host->device via SET_REPORT.
+				memset((void *)custom_feature_reply_buffer, 0, setup.wLength);
+				if (setup.wLength == 65) {
+					custom_feature_reply_buffer[0] = requested_report_id;
+				}
+				arm_dcache_flush_delete((void*)custom_feature_reply_buffer, setup.wLength);
+				endpoint0_transmit((void *)custom_feature_reply_buffer, setup.wLength, 0);
+				custom_feature_reply_data_ready = 0;
+				custom_feature_reply_len_received = setup.wLength;
+				return;
+			}
+
+			if (requested_report_id != CUSTOM_FEATURE_REPORT_ID_COMMAND) {
+				memset((void *)custom_feature_reply_buffer, 0, setup.wLength);
+				if (setup.wLength == 65) {
+					custom_feature_reply_buffer[0] = requested_report_id;
+				}
+				arm_dcache_flush_delete((void*)custom_feature_reply_buffer, setup.wLength);
+				endpoint0_transmit((void *)custom_feature_reply_buffer, setup.wLength, 0);
+				custom_feature_reply_data_ready = 0;
+				custom_feature_reply_len_received = setup.wLength;
+				return;
+			}
+
+			uint16_t reply_len = custom_feature_reply_len_received;
+			if (reply_len != 64 && reply_len != 65) {
+				reply_len = setup.wLength;
+			}
+			if (reply_len > setup.wLength) {
+				reply_len = setup.wLength;
+			}
+			if (reply_len == 0 || reply_len > sizeof(custom_feature_reply_buffer)) {
+				reply_len = setup.wLength;
+			}
+			if (!custom_feature_reply_data_ready) {
+				memset((void *)custom_feature_reply_buffer, 0, reply_len);
+			}
+
+			// For 65-byte feature reads, include the requested report ID in byte 0.
+			if (reply_len >= 1 && setup.wLength == 65) {
+				custom_feature_reply_buffer[0] = requested_report_id;
+			}
+
+			arm_dcache_flush_delete((void*)custom_feature_reply_buffer, reply_len);
+			endpoint0_transmit((void *)custom_feature_reply_buffer, reply_len, 0);
+			custom_feature_reply_data_ready = 0;
+			custom_feature_reply_len_received = reply_len;
+			return;
+		}
+#endif
+#if defined(MULTITOUCH_INTERFACE)
 		if (setup.wValue == 0x0300 && setup.wIndex == MULTITOUCH_INTERFACE) {
 			endpoint0_buffer[0] = MULTITOUCH_FINGERS;
 			endpoint0_transmit(endpoint0_buffer, 1, 0);
@@ -736,6 +795,7 @@ static void endpoint0_setup(uint64_t setupdata)
 			endpoint0_transmit(endpoint0_buffer, 8, 0);
 			return;
 		}
+#endif
 		break;
 #endif
 #if defined(MTP_INTERFACE)
