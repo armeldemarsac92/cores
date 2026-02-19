@@ -734,7 +734,12 @@ static void endpoint0_setup(uint64_t setupdata)
 		if ((setup.wValue & 0xFF00) == 0x0300 && setup.wIndex == KEYBOARD_INTERFACE &&
 		    (setup.wLength == 64 || setup.wLength == 65)) {
 			const uint8_t requested_report_id = (uint8_t)(setup.wValue & 0x00FF);
-			if (requested_report_id == CUSTOM_FEATURE_REPORT_ID_WINDOW) {
+			// Windows keyboard stack may issue GET_REPORT with report ID 0 for feature
+			// descriptors that do not explicitly define Report IDs. Treat that as our
+			// command mailbox poll for compatibility.
+			const uint8_t effective_report_id =
+				(requested_report_id == 0) ? CUSTOM_FEATURE_REPORT_ID_COMMAND : requested_report_id;
+			if (effective_report_id == CUSTOM_FEATURE_REPORT_ID_WINDOW) {
 				// Window title flow is host->device via SET_REPORT.
 				memset((void *)custom_feature_reply_buffer, 0, setup.wLength);
 				if (setup.wLength == 65) {
@@ -747,7 +752,7 @@ static void endpoint0_setup(uint64_t setupdata)
 				return;
 			}
 
-			if (requested_report_id != CUSTOM_FEATURE_REPORT_ID_COMMAND) {
+			if (effective_report_id != CUSTOM_FEATURE_REPORT_ID_COMMAND) {
 				memset((void *)custom_feature_reply_buffer, 0, setup.wLength);
 				if (setup.wLength == 65) {
 					custom_feature_reply_buffer[0] = requested_report_id;
@@ -774,7 +779,9 @@ static void endpoint0_setup(uint64_t setupdata)
 			}
 
 			// For 65-byte feature reads, include the requested report ID in byte 0.
-			if (reply_len >= 1 && setup.wLength == 65) {
+			// If host requested ID 0, keep byte 0 untouched so a queued command
+			// report ID (0x02) is preserved.
+			if (reply_len >= 1 && setup.wLength == 65 && requested_report_id != 0) {
 				custom_feature_reply_buffer[0] = requested_report_id;
 			}
 
